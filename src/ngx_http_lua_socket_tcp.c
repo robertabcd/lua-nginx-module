@@ -23,7 +23,10 @@ static int ngx_http_lua_socket_tcp_connect(lua_State *L);
 #if (NGX_HTTP_SSL)
 static int ngx_http_lua_socket_tcp_sslhandshake(lua_State *L);
 #endif
+static int ngx_http_lua_socket_tcp_receive_common(lua_State *L,
+                                                  unsigned fulfill_partial);
 static int ngx_http_lua_socket_tcp_receive(lua_State *L);
+static int ngx_http_lua_socket_tcp_receiveatmost(lua_State *L);
 static int ngx_http_lua_socket_tcp_send(lua_State *L);
 static int ngx_http_lua_socket_tcp_close(lua_State *L);
 static int ngx_http_lua_socket_tcp_setoption(lua_State *L);
@@ -228,10 +231,13 @@ ngx_http_lua_inject_socket_tcp_api(ngx_log_t *log, lua_State *L)
 
     /* {{{req socket object metatable */
     lua_pushlightuserdata(L, &ngx_http_lua_req_socket_metatable_key);
-    lua_createtable(L, 0 /* narr */, 5 /* nrec */);
+    lua_createtable(L, 0 /* narr */, 6 /* nrec */);
 
     lua_pushcfunction(L, ngx_http_lua_socket_tcp_receive);
     lua_setfield(L, -2, "receive");
+
+    lua_pushcfunction(L, ngx_http_lua_socket_tcp_receiveatmost);
+    lua_setfield(L, -2, "receiveatmost");
 
     lua_pushcfunction(L, ngx_http_lua_socket_tcp_receiveuntil);
     lua_setfield(L, -2, "receiveuntil");
@@ -250,10 +256,13 @@ ngx_http_lua_inject_socket_tcp_api(ngx_log_t *log, lua_State *L)
 
     /* {{{raw req socket object metatable */
     lua_pushlightuserdata(L, &ngx_http_lua_raw_req_socket_metatable_key);
-    lua_createtable(L, 0 /* narr */, 6 /* nrec */);
+    lua_createtable(L, 0 /* narr */, 7 /* nrec */);
 
     lua_pushcfunction(L, ngx_http_lua_socket_tcp_receive);
     lua_setfield(L, -2, "receive");
+
+    lua_pushcfunction(L, ngx_http_lua_socket_tcp_receiveatmost);
+    lua_setfield(L, -2, "receiveatmost");
 
     lua_pushcfunction(L, ngx_http_lua_socket_tcp_receiveuntil);
     lua_setfield(L, -2, "receiveuntil");
@@ -275,7 +284,7 @@ ngx_http_lua_inject_socket_tcp_api(ngx_log_t *log, lua_State *L)
 
     /* {{{tcp object metatable */
     lua_pushlightuserdata(L, &ngx_http_lua_tcp_socket_metatable_key);
-    lua_createtable(L, 0 /* narr */, 12 /* nrec */);
+    lua_createtable(L, 0 /* narr */, 13 /* nrec */);
 
     lua_pushcfunction(L, ngx_http_lua_socket_tcp_connect);
     lua_setfield(L, -2, "connect");
@@ -289,6 +298,9 @@ ngx_http_lua_inject_socket_tcp_api(ngx_log_t *log, lua_State *L)
 
     lua_pushcfunction(L, ngx_http_lua_socket_tcp_receive);
     lua_setfield(L, -2, "receive");
+
+    lua_pushcfunction(L, ngx_http_lua_socket_tcp_receiveatmost);
+    lua_setfield(L, -2, "receiveatmost");
 
     lua_pushcfunction(L, ngx_http_lua_socket_tcp_receiveuntil);
     lua_setfield(L, -2, "receiveuntil");
@@ -1708,7 +1720,21 @@ ngx_http_lua_socket_tcp_conn_retval_handler(ngx_http_request_t *r,
 
 
 static int
+ngx_http_lua_socket_tcp_receiveatmost(lua_State *L)
+{
+    return ngx_http_lua_socket_tcp_receive_common(L, 1);
+}
+
+
+static int
 ngx_http_lua_socket_tcp_receive(lua_State *L)
+{
+    return ngx_http_lua_socket_tcp_receive_common(L, 0);
+}
+
+
+static int
+ngx_http_lua_socket_tcp_receive_common(lua_State *L, unsigned fulfill_partial)
 {
     ngx_http_request_t                  *r;
     ngx_http_lua_socket_tcp_upstream_t  *u;
@@ -1757,6 +1783,8 @@ ngx_http_lua_socket_tcp_receive(lua_State *L)
         lua_pushliteral(L, "closed");
         return 2;
     }
+
+    u->fulfill_partial = fulfill_partial;
 
     if (u->request != r) {
         return luaL_error(L, "bad request");
@@ -2322,6 +2350,15 @@ success:
         return NGX_ERROR;
     }
 #endif
+
+    // Whether to fulfill a partial read.
+    ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                  "fulfill_partial=%d rest=%d length=%d", u->fulfill_partial,
+                  u->rest, u->length);
+    if (u->fulfill_partial && u->rest < u->length) {
+        ngx_http_lua_socket_handle_read_success(r, u);
+        return NGX_OK;
+    }
 
     if (rev->active) {
         ngx_add_timer(rev, u->read_timeout);
